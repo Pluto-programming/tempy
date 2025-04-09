@@ -10,7 +10,7 @@ SRC_DIR = Src
 INCLUDE_DIR = Include
 BIN_DIR = bin
 AUTH_DIR = Auth-Server
-CLIENT_DIR = Client-Server
+CLIENT_DIR = Client-server
 CHAT_DIR = Chat-Server
 
 # Shared Object Files

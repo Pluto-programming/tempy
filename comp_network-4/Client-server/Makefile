@@ -1,16 +1,17 @@
-CC=g++
-CFLAGS=-Wall -Werror -g -I/opt/homebrew/opt/openssl@3/include
-LDFLAGS=-L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto
+CXX = g++
+CXXFLAGS = -Wall -Werror -g -std=c++17 -I../Include -I/opt/homebrew/opt/openssl@3/include
+LDFLAGS = -L/opt/homebrew/opt/openssl@3/lib -lssl -lcrypto -lpthread
 
-.PHONY: all clean
+SRCS = main.cpp ../Src/aes_utils.cpp ../Src/logger.cpp ../Src/shared.cpp
+OBJS = $(SRCS:.cpp=.o)
 
 all: client-server
 
-client-server: main.o
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+client-server: $(OBJS)
+	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS)
 
-main.o: main.cpp
-	$(CC) $(CFLAGS) -c main.cpp
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 
 clean:
-	rm -f *.o client-server
+	rm -f client-server $(OBJS)

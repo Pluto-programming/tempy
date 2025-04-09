@@ -1,130 +1,44 @@
-//#include <iostream>
-//int main() { std::cout << "Client Running" << std::endl; return 0; }
-
-//#include <iostream>
-//#include <fstream>
-//#include <string>
-//#include <unistd.h>
-//#include <arpa/inet.h>
-//#include <openssl/rand.h>
-//#include "../Include/aes_utils.h"
-//#include "../Include/logger.h"
-//#include "../Include/shared.h"
-//
-//#define AUTH_PORT 5555
-//#define CHAT_PORT 6666
-//#define USER_KEY_FILE "../Certs/usr_key.bin"
-//
-//std::string session_key;
-//
-//std::string request_session_key(const std::string& username) {
-//    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-//    sockaddr_in addr{};
-//    addr.sin_family = AF_INET;
-//    addr.sin_port = htons(AUTH_PORT);
-//    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-//
-//    connect(sockfd, (sockaddr*)&addr, sizeof(addr));
-//    std::string nonce = "12345678";  // could be random
-//    std::string auth_msg = username + "," + nonce;
-//    send(sockfd, auth_msg.c_str(), auth_msg.size(), 0);
-//
-//    unsigned char user_key[32];
-//    std::ifstream keyfile(USER_KEY_FILE, std::ios::binary);
-//    keyfile.read((char*)user_key, 32);
-//    keyfile.close();
-//
-//    // receive encrypted key
-//    unsigned char encrypted[512], iv[12], tag[16];
-//    recv(sockfd, encrypted, sizeof(encrypted), 0);
-//    recv(sockfd, iv, sizeof(iv), 0);
-//    recv(sockfd, tag, sizeof(tag), 0);
-//
-//    unsigned char* plaintext = nullptr;
-//    int declen = aes_decrypt_gcm(encrypted, 512, user_key, iv, tag, &plaintext);
-//    std::string decrypted_msg((char*)plaintext, declen);
-//    delete[] plaintext;
-//    close(sockfd);
-//
-//    size_t last_comma = decrypted_msg.rfind(',');
-//    std::string skey = decrypted_msg.substr(last_comma - 32, 32); // assuming key is last 32 bytes
-//    return skey;
-//}
-//
-//void chat_loop(const std::string& skey) {
-//    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-//    sockaddr_in addr{};
-//    addr.sin_family = AF_INET;
-//    addr.sin_port = htons(CHAT_PORT);
-//    addr.sin_addr.s_addr = inet_addr("127.0.0.1");
-//
-//    connect(sockfd, (sockaddr*)&addr, sizeof(addr));
-//    std::string msg;
-//    while (true) {
-//        std::cout << "> ";
-//        std::getline(std::cin, msg);
-//        if (msg == "exit") break;
-//
-//        unsigned char iv[12], tag[16], encrypted[512];
-//        RAND_bytes(iv, sizeof(iv));
-//        int len = 0;
-//        aes_encrypt_gcm((unsigned char*)msg.c_str(), msg.size(), (unsigned char*)skey.c_str(), iv, encrypted, &len, tag);
-//        send(sockfd, encrypted, len, 0);
-//    }
-//    close(sockfd);
-//}
-//
-//int main() {
-//    log_message("[Client] Starting");
-//    session_key = request_session_key("client1");
-//    log_message("[Client] Got session key: " + session_key);
-//    chat_loop(session_key);
-//    return 0;
-//}
-
+#include <cstring>
 #include <iostream>
 #include <fstream>
-#include <string>
 #include <vector>
+#include <string>
+#include <sstream>
+#include <thread>
+#include <csignal>
 #include <unistd.h>
 #include <arpa/inet.h>
-#include <openssl/rand.h>
 #include <openssl/evp.h>
+#include <openssl/rand.h>
 #include "../Include/aes_utils.h"
-#include "../Include/logger.h"
 #include "../Include/shared.h"
 
-#define AUTH_PORT 5555
+#define AUTH_PORT 8081
 #define CHAT_PORT 6666
-#define USER_KEY_FILE "../Certs/usr_key.bin"
+#define USER_KEY_PATH "../Certs/usr_key.bin"
+#define CHAT_KEY_PATH "../Certs/chat_server_key.bin"
 
-unsigned char session_key[32] = {0};
+int chat_sock = -1;
 
-std::string receive_and_decrypt_payload(int sock, const unsigned char* key) {
-    unsigned char encrypted[512], iv[12], tag[16];
-    int enc_len = recv(sock, encrypted, sizeof(encrypted), 0);
-    int iv_len = recv(sock, iv, sizeof(iv), 0);
-    int tag_len = recv(sock, tag, sizeof(tag), 0);
-
-    if (enc_len <= 0 || iv_len != 12 || tag_len != 16) {
-        std::cerr << "[Client] ERROR: Failed to receive full encrypted payload\n";
-        exit(1);
+std::vector<std::string> split(const std::string& str, char delim) {
+    std::vector<std::string> out;
+    std::stringstream ss(str);
+    std::string token;
+    while (std::getline(ss, token, delim)) {
+        out.push_back(token);
     }
-
-    unsigned char* plaintext = nullptr;
-    int declen = aes_decrypt_gcm(encrypted, enc_len, key, iv, tag, &plaintext);
-
-    if (declen <= 0) {
-        std::cerr << "[Client] ERROR: Decryption failed\n";
-        exit(1);
-    }
-
-    std::string result((char*)plaintext, declen);
-    delete[] plaintext;
-    return result;
+    return out;
 }
 
-void request_session_key_from_auth() {
+void signal_handler(int signum) {
+    if (chat_sock != -1) close(chat_sock);
+    std::cout << "\n[Client] Exiting gracefully." << std::endl;
+    exit(0);
+}
+
+void request_session_key_from_auth(std::vector<unsigned char>& session_key) {
+    std::cout << "[Client] Connecting to auth-server..." << std::endl;
+
     int sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -132,81 +46,129 @@ void request_session_key_from_auth() {
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     connect(sock, (sockaddr*)&addr, sizeof(addr));
+    send(sock, "client1,12345678", 16, 0);
 
-    std::string username = "client1";
-    std::string nonce = "12345678";
-    std::string auth_msg = username + "," + nonce;
-    send(sock, auth_msg.c_str(), auth_msg.size(), 0);
+    char buffer[2048] = {0};
+    int len = recv(sock, buffer, sizeof(buffer), 0);
+    std::string full(buffer, len);
 
-    unsigned char user_key[32];
-    std::ifstream keyfile(USER_KEY_FILE, std::ios::binary);
-    if (!keyfile) {
-        std::cerr << "[Client] ERROR: Unable to open user key file\n";
-        exit(1);
-    }
-    keyfile.read((char*)user_key, 32);
-    keyfile.close();
+    std::cout << "[Client] Received total payload (" << len << " bytes):" << full << std::endl;
 
-    std::string decrypted = receive_and_decrypt_payload(sock, user_key);
-    std::cout << "[Client] Decrypted payload: " << decrypted << std::endl;
-
-    size_t last_comma = decrypted.rfind(',');
-    if (last_comma == std::string::npos) {
-        std::cerr << "[Client] ERROR: Payload missing session key\n";
+    std::vector<std::string> parts = split(full, ',');
+    if (parts.size() != 6) {
+        std::cerr << "[Client] ERROR: Expected 6 comma-separated parts" << std::endl;
         exit(1);
     }
 
-    std::string b64_key = decrypted.substr(last_comma + 1);
-    if (b64_key.empty()) {
-        std::cerr << "[Client] ERROR: Session key is empty\n";
+    unsigned char user_key[32], chat_key[32];
+    std::ifstream ukey(USER_KEY_PATH, std::ios::binary);
+    if (!ukey.read((char*)user_key, sizeof(user_key))) {
+        std::cerr << "[Client] ERROR: Failed to load user key\n";
+        exit(1);
+    }
+    ukey.close();
+
+    std::ifstream ckey(CHAT_KEY_PATH, std::ios::binary);
+    if (!ckey.read((char*)chat_key, sizeof(chat_key))) {
+        std::cerr << "[Client] ERROR: Failed to load chat key\n";
+        exit(1);
+    }
+    ckey.close();
+
+    auto b64_to_bytes = [](const std::string& in) {
+        std::vector<unsigned char> out(in.length());
+        int len = EVP_DecodeBlock(out.data(), (const unsigned char*)in.c_str(), in.length());
+        out.resize(len);
+        return out;
+    };
+
+    auto msg1 = b64_to_bytes(parts[0]);
+    auto iv1  = b64_to_bytes(parts[1]);
+    auto tag1 = b64_to_bytes(parts[2]);
+    auto msg2 = b64_to_bytes(parts[3]);
+    auto iv2  = b64_to_bytes(parts[4]);
+    auto tag2 = b64_to_bytes(parts[5]);
+
+    unsigned char* out1 = nullptr;
+    unsigned char* out2 = nullptr;
+    aes_decrypt_gcm(msg1.data(), msg1.size(), user_key, iv1.data(), tag1.data(), &out1);
+    aes_decrypt_gcm(msg2.data(), msg2.size(), chat_key, iv2.data(), tag2.data(), &out2);
+
+    std::string decrypted1((char*)out1);
+    std::string decrypted2((char*)out2);
+    std::cout << "[Client] Client-decrypted: " << decrypted1 << std::endl;
+    std::cout << "[Client] Chat-decrypted:   " << decrypted2 << std::endl;
+
+    free(out1);
+    free(out2);
+
+    auto fields = split(decrypted1, ',');
+    if (fields.size() != 4) {
+        std::cerr << "[Client] ERROR: Decrypted message from auth-server does not have 4 fields." << std::endl;
         exit(1);
     }
 
-    int decoded_len = EVP_DecodeBlock(session_key, (const unsigned char*)b64_key.c_str(), b64_key.length());
-
-    // EVP_DecodeBlock always returns multiples of 3 — may add 1 null byte if base64 ended in "="
-    if (decoded_len > 32) decoded_len = 32;  // trim extra byte safely
-
-    if (decoded_len != 32) {
-        std::cerr << "[Client] ERROR: Decoded session key length incorrect after trim (" << decoded_len << ")\n";
-        exit(1);
-    }
-
-
-    std::cout << "[Client] Got session key (base64): " << b64_key << std::endl;
-    close(sock);
+    std::string session_key_b64 = fields[3];
+    session_key.resize(32);
+    EVP_DecodeBlock(session_key.data(), (const unsigned char*)session_key_b64.c_str(), session_key_b64.length());
 }
 
-void chat_loop() {
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
+void chat_loop(const std::vector<unsigned char>& session_key) {
+    chat_sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_port = htons(CHAT_PORT);
     addr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    connect(sock, (sockaddr*)&addr, sizeof(addr));
-    std::cout << "[Client] Connected to chat server.\n";
+    connect(chat_sock, (sockaddr*)&addr, sizeof(addr));
+    std::cout << "[Client] Connected to chat server." << std::endl;
 
+    std::thread reader([&]() {
+        char buffer[2048];
+        while (true) {
+            memset(buffer, 0, sizeof(buffer));
+            int len = recv(chat_sock, buffer, sizeof(buffer), 0);
+            if (len <= 0) break;
+
+            unsigned char* plaintext = nullptr;
+            unsigned char iv[12], tag[16];
+            memcpy(iv, buffer, 12);
+            memcpy(tag, buffer + 12, 16);
+            aes_decrypt_gcm((unsigned char*)buffer + 28, len - 28, session_key.data(), iv, tag, &plaintext);
+            std::cout << "\r[Message] " << plaintext << "\n> " << std::flush;
+            free(plaintext);
+        }
+    });
+
+    std::string line;
     while (true) {
-        std::string msg;
-        std::cout << "> ";
-        std::getline(std::cin, msg);
-        if (msg == "exit") break;
+        std::cout << "> " << std::flush;
+        std::getline(std::cin, line);
 
-        unsigned char iv[12], tag[16], encrypted[512];
+        unsigned char ciphertext[2048], tag[16], iv[12];
         RAND_bytes(iv, sizeof(iv));
-        int len = 0;
-        aes_encrypt_gcm((unsigned char*)msg.c_str(), msg.size(), session_key, iv, encrypted, &len, tag);
+        int len;
+        aes_encrypt_gcm((unsigned char*)line.c_str(), line.size(), session_key.data(), iv, ciphertext, &len, tag);
 
-        send(sock, encrypted, len, 0);
+        std::vector<unsigned char> packet;
+        packet.insert(packet.end(), iv, iv + 12);
+        packet.insert(packet.end(), tag, tag + 16);
+        packet.insert(packet.end(), ciphertext, ciphertext + len);
+
+        send(chat_sock, packet.data(), packet.size(), 0);
     }
 
-    close(sock);
+    reader.join();
 }
 
 int main() {
-    log_message("[Client] Starting...");
-    request_session_key_from_auth();
-    chat_loop();
+    std::signal(SIGINT, signal_handler);
+    std::cout << "[Client] Starting main()" << std::endl;
+
+    std::vector<unsigned char> session_key;
+    request_session_key_from_auth(session_key);
+    std::cout << "[Client] Session key retrieved successfully." << std::endl;
+
+    chat_loop(session_key);
     return 0;
 }
